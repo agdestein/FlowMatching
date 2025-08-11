@@ -1,2 +1,11 @@
 .ipynb_checkpoints/
 .DS_store
+.pixi/*
+pixi.lock
+.vscode
+*Manifest.toml
+*.swp
+*.un~
+*.DS_Store
+*.out
+.gitattributes
