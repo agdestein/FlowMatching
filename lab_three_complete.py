@@ -526,6 +526,10 @@ class Trainer(ABC):
 # In this section, we'll get a feel for MNIST. We'll then experiment with adding noise to MNIST with `ConditionalGaussianProbabilityPath`.
 
 # %%
+!wget www.di.ens.fr/~lelarge/MNIST.tar.gz
+!tar -zxvf MNIST.tar.gz
+
+# %%
 class MNISTSampler(nn.Module, Sampleable):
     """
     Sampleable wrapper for the MNIST dataset
@@ -533,7 +537,7 @@ class MNISTSampler(nn.Module, Sampleable):
     def __init__(self):
         super().__init__()
         self.dataset = datasets.MNIST(
-            root='./data',
+            root='./',
             train=True,
             download=True,
             transform=transforms.Compose([
@@ -848,7 +852,10 @@ class Midcoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, channels_in: int, channels_out: int, num_residual_layers: int, t_embed_dim: int, y_embed_dim: int):
         super().__init__()
-        self.upsample = nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear'), nn.Conv2d(channels_in, channels_out, kernel_size=3, padding=1))
+        self.upsample = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(channels_in, channels_out, kernel_size=3, padding=1),
+        )
         self.res_blocks = nn.ModuleList([
             ResidualLayer(channels_out, t_embed_dim, y_embed_dim) for _ in range(num_residual_layers)
         ])
@@ -869,11 +876,16 @@ class Decoder(nn.Module):
 
         return x
 
+
 class MNISTUNet(ConditionalVectorField):
     def __init__(self, channels: List[int], num_residual_layers: int, t_embed_dim: int, y_embed_dim: int):
         super().__init__()
         # Initial convolution: (bs, 1, 32, 32) -> (bs, c_0, 32, 32)
-        self.init_conv = nn.Sequential(nn.Conv2d(1, channels[0], kernel_size=3, padding=1), nn.BatchNorm2d(channels[0]), nn.SiLU())
+        self.init_conv = nn.Sequential(
+            nn.Conv2d(1, channels[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels[0]),
+            nn.SiLU(),
+        )
 
         # Initialize time embedder
         self.time_embedder = FourierEncoder(t_embed_dim)
@@ -998,6 +1010,14 @@ for idx, w in enumerate(guidance_scales):
     axes[idx].axis("off")
     axes[idx].set_title(f"Guidance: $w={w:.1f}$", fontsize=25)
 plt.show()
+
+# %%
+unet
+
+
+# %%
+total_params = sum(p.numel() for p in unet.parameters())
+print(f"Total parameters: {total_params}")
 
 # %% [markdown]
 # **Your job:** What do you notice about our samples as the quality improves? Why might increasing the guidance scale $w$ have this affect? Propose an intuitive explanation in your own words.
