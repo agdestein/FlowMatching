@@ -90,8 +90,9 @@ data_train[1].targets
 function FourierEncoder(dim)
     @assert dim % 2 == 0
     half_dim = div(dim, 2)
+    weights = randn(Float32, half_dim) |> gpu_device()
     @compact(;
-        weights = randn(Float32, half_dim),
+             weights,
     ) do t
         t = reshape(t, 1, :)
         freqs = @. 2 * t * weights
@@ -171,7 +172,6 @@ let
     ps, st = Lux.setup(rng, net)
     net((x, t_embed, y_embed), ps, st) |> first |> size
 end
-
 
 Midcoder(channels, num_residual_layers, t_embed_dim, y_embed_dim) =
     @compact(;
@@ -290,36 +290,36 @@ MNISTUNet(; channels, num_residual_layers, t_embed_dim, y_embed_dim) =
 # %%
 # Initialize model
 let
-device = gpu_device()
-model = MNISTUNet(;
-    channels = [32, 64, 128],
-    num_residual_layers = 2,
-    t_embed_dim = 40,
-    y_embed_dim = 40,
-)
-ps, st = Lux.setup(rng, model);
-train_state = Training.TrainState(model, ps, st, Adam(1f-3))
-nepoch = 1 # 20
-nsample = 250
-eta = 0.1
-data_train = loadmnist(nsample, :train)
-loss = MSELoss()
-for iepoch = 1:nepoch, (ibatch, batch) in enumerate(data_train)
-    y, z = batch |> device
-    # Set each label to 10 (i.e., null) with probability eta
-    @. y = ifelse(rand() > eta, y, 11)
-    x0 = randn!(similar(z))
-    t = rand!(similar(z, nsample))
-    tre = reshape(t, 1, 1, 1, :)
-    x = @. tre * z + (1 - tre) * x0
-    u = @. (z - x) / (1 - tre) # Linear conditional vector field
-    _, l, _, train_state = Training.single_train_step!(
-        AutoZygote(), loss, ((x, t, y), u), train_state
+    device = gpu_device()
+    model = MNISTUNet(;
+        channels = [32, 64, 128],
+        num_residual_layers = 2,
+        t_embed_dim = 40,
+        y_embed_dim = 40,
     )
-    # l, g = withgradient(ps) do ps
-    #     umod, st = model((x, t, y), ps, st)
-    #     loss(umod, u)
-    # end
-    ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
-end
+    ps, st = Lux.setup(rng, model) |> device;
+    train_state = Training.TrainState(model, ps, st, Adam(1f-3))
+    nepoch = 1 # 20
+    nsample = 250
+    eta = 0.1
+    data_train = loadmnist(nsample, :train)
+    loss = MSELoss()
+    for iepoch = 1:nepoch, (ibatch, batch) in enumerate(data_train)
+        y, z = batch |> device
+        # Set each label to 10 (i.e., null) with probability eta
+        @. y = ifelse(rand() > eta, y, 11)
+        x0 = randn!(similar(z))
+        t = rand!(similar(z, nsample))
+        tre = reshape(t, 1, 1, 1, :)
+        x = @. tre * z + (1 - tre) * x0
+        u = @. (z - x) / (1 - tre) # Linear conditional vector field
+        _, l, _, train_state = Training.single_train_step!(
+            AutoZygote(), loss, ((x, t, y), u), train_state
+        )
+        # l, g = withgradient(ps) do ps
+        #     umod, st = model((x, t, y), ps, st)
+        #     loss(umod, u)
+        # end
+        ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
+    end
 end
