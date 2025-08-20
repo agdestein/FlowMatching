@@ -9,3 +9,5 @@ pixi.lock
 *.DS_Store
 *.out
 .gitattributes
+MNIST
+output/

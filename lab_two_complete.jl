@@ -9,6 +9,7 @@ using ForwardDiff: vector_mode_jacobian
 # ### Part 0: Miscellaneous Imports and Utility Functions
 
 using Adapt
+using CairoMakie
 using Distributions
 using ForwardDiff
 using LinearAlgebra
@@ -18,6 +19,8 @@ using Optimisers
 using Random
 using WGLMakie
 using Zygote
+
+outdir = joinpath(@__DIR__, "output", "lab_two") |> mkpath
 
 function simulate(step, x, ts)
     for t_idx in eachindex(ts)
@@ -95,7 +98,7 @@ isotropic(std) = MvNormal(zeros(2), std^2 * I(2))
 PARAMS = (; scale = 15.0, target_scale = 10.0, target_std = 1.0)
 
 # %%
-p_simple = isotropic(; dim = 2, std = 1.0)
+p_simple = isotropic(1.0)
 p_data = symmetric_2D(5, PARAMS.target_std, PARAMS.target_scale)
 
 function densityheatmap!(ax; scale, nbin, distribution, dolog = true, kwargs...)
@@ -303,6 +306,7 @@ let
         lines!(ax, x[1, :], x[2, :]; color = :black)
     end
     scatter!(ax, z...; marker = :star5, markersize = 20, color = :green)
+    save("$outdir/conditional_vector_field.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -380,7 +384,7 @@ let
     end
     scatter!(ax, z...; marker = :star5, markersize = 20, color = :green)
     axislegend(ax)
-    ax = Axis(fig[1, 2]; title = "Trajectories of conditional ODE", aspect = DataAspect())
+    ax = Axis(fig[1, 2]; title = "Trajectories of conditional SDE", aspect = DataAspect())
     densityheatmap!(ax; scale, nbin, distribution = p_simple)
     densityheatmap!(
         ax;
@@ -400,6 +404,7 @@ let
         lines!(ax, x[1, :], x[2, :]; color = :black)
     end
     scatter!(ax, z...; marker = :star5, markersize = 20, color = :green)
+    save("$outdir/conditional_score.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -446,7 +451,7 @@ let
 end
 
 # Construct conditional probability path
-p_simple = isotropic(; dim = 2, std = 1.0)
+p_simple = isotropic(1.0)
 p_data = symmetric_2D(5, PARAMS.target_std, PARAMS.target_scale)
 
 # %% [markdown]
@@ -539,6 +544,7 @@ let
         x = simulate_with_trajectory(step, x0, t)
         lines!(ax, x[1, :], x[2, :]; color = :black)
     end
+    save("$outdir/flow_matching.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -650,6 +656,7 @@ let
         x = simulate_with_trajectory(step, x0, t)
         lines!(ax, x[1, :], x[2, :]; linewidth = 0.5, color = :black)
     end
+    save("$outdir/score_matching.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -739,6 +746,7 @@ let
             )
         end
     end
+    save("$outdir/flow_and_score.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -821,6 +829,7 @@ let
         ylims!(ax, -scale, scale)
         ax.aspect = DataAspect()
     end
+    save("$outdir/distributions.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -892,6 +901,7 @@ let
             scatter!(ax2, z...; marker = :star5, markersize = 20, color = :green)
         end
     end
+    save("$outdir/linear_interpolations.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -980,6 +990,7 @@ let
         hexbin!(ax1, xmarginal[1, :], xmarginal[2, :]; bins = 200)
         hexbin!(ax2, xode[1, :], xode[2, :]; bins = 200)
     end
+    save("$outdir/flow_matching_non_gaussian.pdf", fig; backend = CairoMakie)
     fig
 end
 
