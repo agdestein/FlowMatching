@@ -32,6 +32,10 @@ function loadmnist(batchsize, split)
     y = labels_raw .+ 1 |> collect
     z = reshape(imgs, size(imgs, 1), size(imgs, 2), 1, size(imgs, 3)) |> f32 |> collect
 
+    # Normalize
+    μ, σ = 5f-1, 5f-1
+    @. z = (z - μ) / σ
+
     # Use DataLoader to automatically minibatch and shuffle the data
     DataLoader((y, z); batchsize, shuffle = true, partial = false)
 end
@@ -298,7 +302,7 @@ unet = let
         y_embed_dim = 40,
     )
     ps, st = Lux.setup(rng, model) |> device
-    train_state = Training.TrainState(model, ps, st, Adam(5.0f-4))
+    train_state = Training.TrainState(model, ps, st, Adam(1.0f-3))
     nepoch = 20
     nsample = 250
     eta = 0.1
@@ -310,6 +314,7 @@ unet = let
         @. y = ifelse(rand() > eta, y, 11)
         x0 = randn!(similar(z))
         t = rand!(similar(z, nsample))
+        t .*= 0.999f0 # Definition of target `u` is not good for `t` close to 1
         tre = reshape(t, 1, 1, 1, :)
         x = @. tre * z + (1 - tre) * x0
         u = @. (z - x) / (1 - tre) # Linear conditional vector field
@@ -330,7 +335,7 @@ let
     # Play with these!
     nsample = 10
     nstep = 100
-    guidance_scales = [1f0, 3f0, 5f0]
+    guidance_scales = [0f0, 3f0, 5f0]
     fig = Figure(; size = (800, 300))
     for (i, w) in enumerate(guidance_scales)
         labels = 1:11
@@ -364,7 +369,7 @@ let
         x = reshape(x, 28, 28, nsample, nlabel)
         x = permutedims(x, (1, 3, 2, 4))
         x = reshape(x, 28 * nsample, 28 * nlabel)
-        image!(ax, x; interpolate = false, colorrange = (0, 1))
+        image!(ax, x; interpolate = false, colorrange = (-1, 1))
     end
     file = "$outdir/results.pdf"
     @info "Saving to $file"
