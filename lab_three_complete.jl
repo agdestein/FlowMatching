@@ -7,6 +7,7 @@
 # If you find any mistakes, or have any other feedback, please feel free to email us at `erives@mit.edu` and `phold@mit.edu`. Enjoy!
 
 using Adapt
+using CairoMakie
 using Distributions
 using ForwardDiff
 using LinearAlgebra
@@ -30,7 +31,7 @@ function loadmnist(batchsize, split)
     z = reshape(imgs, size(imgs, 1), size(imgs, 2), 1, size(imgs, 3)) |> f32 |> collect
 
     # Use DataLoader to automatically minibatch and shuffle the data
-    DataLoader((y, z); batchsize, shuffle=true)
+    DataLoader((y, z); batchsize, shuffle = true)
 end
 
 silu(x) = @. x / (1 + exp(-x))
@@ -91,13 +92,11 @@ function FourierEncoder(dim)
     @assert dim % 2 == 0
     half_dim = div(dim, 2)
     weights = randn(Float32, half_dim) |> gpu_device()
-    @compact(;
-             weights,
-    ) do t
+    @compact(; weights,) do t
         t = reshape(t, 1, :)
         freqs = @. 2 * t * weights
-        sin_embed = @. sqrt(2f0) * sinpi(freqs)
-        cos_embed = @. sqrt(2f0) * cospi(freqs)
+        sin_embed = @. sqrt(2.0f0) * sinpi(freqs)
+        cos_embed = @. sqrt(2.0f0) * cospi(freqs)
         output = vcat(sin_embed, cos_embed)
         @return output
     end
@@ -170,7 +169,7 @@ let
     # net = ResidualLayer(32, 40, 40)
     net = Encoder(32, 64, 2, 40, 40)
     ps, st = Lux.setup(rng, net)
-    net((x, t_embed, y_embed), ps, st) |> first |> size
+    net((x, t_embed, y_embed), ps, Lux.testmode(st)) |> first |> size
 end
 
 Midcoder(channels, num_residual_layers, t_embed_dim, y_embed_dim) =
@@ -289,7 +288,7 @@ MNISTUNet(; channels, num_residual_layers, t_embed_dim, y_embed_dim) =
 
 # %%
 # Initialize model
-let
+unet = let
     device = gpu_device()
     model = MNISTUNet(;
         channels = [32, 64, 128],
@@ -297,14 +296,15 @@ let
         t_embed_dim = 40,
         y_embed_dim = 40,
     )
-    ps, st = Lux.setup(rng, model) |> device;
-    train_state = Training.TrainState(model, ps, st, Adam(1f-3))
+    ps, st = Lux.setup(rng, model) |> device
+    train_state = Training.TrainState(model, ps, st, Adam(1.0f-3))
     nepoch = 1 # 20
     nsample = 250
     eta = 0.1
     data_train = loadmnist(nsample, :train)
     loss = MSELoss()
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(data_train)
+        ibatch > 5 && break
         y, z = batch |> device
         # Set each label to 10 (i.e., null) with probability eta
         @. y = ifelse(rand() > eta, y, 11)
@@ -313,13 +313,50 @@ let
         tre = reshape(t, 1, 1, 1, :)
         x = @. tre * z + (1 - tre) * x0
         u = @. (z - x) / (1 - tre) # Linear conditional vector field
-        _, l, _, train_state = Training.single_train_step!(
-            AutoZygote(), loss, ((x, t, y), u), train_state
-        )
-        # l, g = withgradient(ps) do ps
-        #     umod, st = model((x, t, y), ps, st)
-        #     loss(umod, u)
-        # end
+        _, l, _, train_state =
+            Training.single_train_step!(AutoZygote(), loss, ((x, t, y), u), train_state)
         ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
     end
+    ps_freeze = train_state.parameters
+    st_freeze = train_state.states
+    (x, t, y) -> first(model((x, t, y), ps_freeze, st_freeze))
+end
+
+# %% [markdown]
+# How well does our model do? Let's find out! We'll use the class `CFGVectorFieldODE` to wrap the UNet in an instance of `ode` so that we can integrate it!
+
+# %%
+let
+    # Play with these!
+    nsample = 10
+    nstep = 2
+    guidance_scales = [1.0, 3.0, 5.0]
+    fig = Figure(; size = (800, 300))
+    for (i, w) in enumerate(guidance_scales)
+        x = randn(Float32, 28, 28, 1, nsample)
+        x = reshape(stack(fill(x, 11); dims = 4), 28, 28, 1, :) |> gpu_device()
+        y = stack(fill(1:11, nsample); dims = 2) |> vec |> gpu_device()
+        t = 0.0f0
+        for j = 1:nstep
+            @show t
+            h = 1.0f0 / nstep
+            tcast = fill(t, 11 * nsample) |> gpu_device()
+            u = unet(x, tcast, y)
+            @. x += h * u
+            t += h
+        end
+        ax = Axis(
+            fig[1, i];
+            title = "Guidance: w = $w",
+            xticksvisible = false,
+            yticksvisible = false,
+            xticklabelsvisible = false,
+            yticklabelsvisible = false,
+            aspect = DataAspect(),
+        )
+        x = reverse(x; dims = 2) # Reorient for plotting
+        x = reshape(x, 28 * 11, 28 * nsample)
+        image!(ax, x)
+    end
+    fig
 end
