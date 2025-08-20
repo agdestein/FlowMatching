@@ -12,14 +12,16 @@ using Distributions
 using ForwardDiff
 using LinearAlgebra
 using Lux
-# using LuxCUDA
+using LuxCUDA
 using NNlib
 using Optimisers
 using Random
-using WGLMakie
+# using WGLMakie
 using Zygote
 using MLDatasets
 using MLUtils
+
+outdir = joinpath(@__DIR__, "output", "lab_three") |> mkpath
 
 function loadmnist(batchsize, split)
     dataset = MNIST(; split)
@@ -31,14 +33,13 @@ function loadmnist(batchsize, split)
     z = reshape(imgs, size(imgs, 1), size(imgs, 2), 1, size(imgs, 3)) |> f32 |> collect
 
     # Use DataLoader to automatically minibatch and shuffle the data
-    DataLoader((y, z); batchsize, shuffle = true)
+    DataLoader((y, z); batchsize, shuffle = true, partial = false)
 end
 
 silu(x) = @. x / (1 + exp(-x))
 
 rng = Random.Xoshiro(0)
 
-data_train = MNIST(:train)
 data_test = MNIST(:test)
 
 data_train.metadata
@@ -297,14 +298,13 @@ unet = let
         y_embed_dim = 40,
     )
     ps, st = Lux.setup(rng, model) |> device
-    train_state = Training.TrainState(model, ps, st, Adam(1.0f-3))
-    nepoch = 1 # 20
+    train_state = Training.TrainState(model, ps, st, Adam(5.0f-4))
+    nepoch = 20
     nsample = 250
     eta = 0.1
     data_train = loadmnist(nsample, :train)
     loss = MSELoss()
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(data_train)
-        ibatch > 5 && break
         y, z = batch |> device
         # Set each label to 10 (i.e., null) with probability eta
         @. y = ifelse(rand() > eta, y, 11)
@@ -319,7 +319,7 @@ unet = let
     end
     ps_freeze = train_state.parameters
     st_freeze = train_state.states
-    (x, t, y) -> first(model((x, t, y), ps_freeze, st_freeze))
+    (x, t, y) -> first(model((x, t, y), ps_freeze, Lux.testmode(st_freeze)))
 end
 
 # %% [markdown]
@@ -329,19 +329,24 @@ end
 let
     # Play with these!
     nsample = 10
-    nstep = 2
-    guidance_scales = [1.0, 3.0, 5.0]
+    nstep = 100
+    guidance_scales = [1f0, 3f0, 5f0]
     fig = Figure(; size = (800, 300))
     for (i, w) in enumerate(guidance_scales)
+        labels = 1:11
+        nlabel = length(labels)
+        y = stack(fill(labels, nsample); dims = 1) |> vec |> gpu_device()
         x = randn(Float32, 28, 28, 1, nsample)
-        x = reshape(stack(fill(x, 11); dims = 4), 28, 28, 1, :) |> gpu_device()
-        y = stack(fill(1:11, nsample); dims = 2) |> vec |> gpu_device()
+        x = reshape(stack(fill(x, nlabel)), 28, 28, 1, :) |> gpu_device()
         t = 0.0f0
         for j = 1:nstep
             @show t
             h = 1.0f0 / nstep
-            tcast = fill(t, 11 * nsample) |> gpu_device()
-            u = unet(x, tcast, y)
+            tcast = fill(t, nsample * nlabel) |> gpu_device()
+            uy = unet(x, tcast, y)
+            ynull = fill!(copy(y), 11)
+            unull = unet(x, tcast, ynull)
+            u = (1 - w) * unull + w * uy
             @. x += h * u
             t += h
         end
@@ -354,9 +359,15 @@ let
             yticklabelsvisible = false,
             aspect = DataAspect(),
         )
+        x = x |> cpu_device()
         x = reverse(x; dims = 2) # Reorient for plotting
-        x = reshape(x, 28 * 11, 28 * nsample)
-        image!(ax, x)
+        x = reshape(x, 28, 28, nsample, nlabel)
+        x = permutedims(x, (1, 3, 2, 4))
+        x = reshape(x, 28 * nsample, 28 * nlabel)
+        image!(ax, x; interpolate = false, colorrange = (0, 1))
     end
+    file = "$outdir/results.pdf"
+    @info "Saving to $file"
+    save(file, fig; backend = CairoMakie)
     fig
 end
