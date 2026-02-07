@@ -12,74 +12,96 @@ using Distributions
 using ForwardDiff
 using LinearAlgebra
 using Lux
-using LuxCUDA
+# using LuxCUDA
 using NNlib
 using Optimisers
 using Random
-# using WGLMakie
+using WGLMakie
 using Zygote
 using MLDatasets
 using MLUtils
 
 outdir = joinpath(@__DIR__, "output", "lab_three") |> mkpath
-
-function loadmnist(batchsize, split)
-    dataset = MNIST(; split)
-    imgs = dataset.features
-    labels_raw = dataset.targets
-
-    # Process images into (H,W,C,BS) batches
-    y = labels_raw .+ 1 |> collect
-    z = reshape(imgs, size(imgs, 1), size(imgs, 2), 1, size(imgs, 3)) |> f32 |> collect
-
-    # Normalize
-    μ, σ = 5f-1, 5f-1
-    @. z = (z - μ) / σ
-
-    # Use DataLoader to automatically minibatch and shuffle the data
-    DataLoader((y, z); batchsize, shuffle = true, partial = false)
-end
-
-silu(x) = @. x / (1 + exp(-x))
-
 rng = Random.Xoshiro(0)
 
-data_test = MNIST(:test)
+# %% [markdown]
+# # Part 1: Getting a Feel for MNIST
+# In this section, we'll get a feel for MNIST. We'll then experiment with adding noise to MNIST.
 
-data_train.metadata
-data_train.features |> size
-data_train.targets
-data_train.split
-
-function implot!(ax, x; kwargs...)
-    x = reverse(x; dims = 2)
-    image!(ax, x; kwargs...)
-end
-function implot(x)
-    fig = Figure()
-    ax = Axis(fig[1, 1]; aspect = DataAspect())
-    implot!(ax, x)
-    fig
-end
-
+# %% [markdown]
+# Now let's view some samples under the conditional probability path.
+#
 let
-    fig = Figure(; size = (500, 500))
-    n = 5
-    for i = 1:n, j = 1:n
-        ax = Axis(
-            fig[i, j];
-            aspect = DataAspect(),
-            xticksvisible = false,
-            yticksvisible = false,
-            xticklabelsvisible = false,
-            yticklabelsvisible = false,
-        )
-        implot!(ax, data_train[i+n*(j-1)].features)
+    data = MNIST(:train)
+    nstep = 5
+    n = 3
+    fig = Figure(; size = (nstep * 200, 200))
+    x0 = [randn(28, 28) for j = 1:n, i = 1:n]
+    for (istep, t) in enumerate(range(0, 1, nstep))
+        g = GridLayout(fig[1, istep])
+        for i = 1:n, j = 1:n
+            ax = Axis(
+                g[i, j];
+                aspect = DataAspect(),
+                xticksvisible = false,
+                yticksvisible = false,
+                xticklabelsvisible = false,
+                yticklabelsvisible = false,
+            )
+            z = data[i+n*(j-1)].features
+            @. z = (z - 0.5) / 0.5
+            x0ij = x0[i, j]
+            x = @. (1 - t) * x0ij + t * z
+            x = reverse(x; dims = 2)
+            image!(ax, x; interpolate = false, colorrange = (-1, 1))
+        end
+        colgap!(g, 0)
+        rowgap!(g, 0)
     end
     fig
 end
 
-data_train[1].targets
+# %% [markdown]
+# # Part 2: Classifier Free Guidance
+
+# %% [markdown]
+# ### Problem 2.1: Classifier Free Guidance
+
+# %% [markdown]
+# **Guidance**: Whereas for unconditional generation, we simply wanted to generate *any* digit, we would now like to be able to specify, or *condition*, on the identity of the digit we would like to generate. That is, we would like to be able to say "generate an image of the digit 8", rather than just "generate an image of a digit". We will henceforth refer to the digit we would like to generate as $x \in \mathbb{R}^{1 \times 32 \times 32}$, and the conditioning variable (in this case, a label), as $y \in \{0, 1, \dots, 9\}$. If we imagine fixing our choice of $y$, and take our data distribution as $p_{\text{simple}}(x|y)$, then we have recovered the unconditional generative problem, and we can construct a generative model using e.g., a conditional flow matching objective via $$\begin{align*}\mathcal{L}_{\text{CFM}}^{\text{guided}}(\theta;y) &= \,\,\mathbb{E}_{\square} \lVert u_t^{\theta}(x|y) - u_t^{\text{ref}}(x|z)\rVert^2\\ \square &= z \sim p_{\text{data}}(z|y), x \sim p_t(x|z)\end{align*}$$
+# We may now then allow $y$ to vary by simply taking our conditional flow matching expectation to be over $y$ as well (rather than fixing $y$), and explicitly conditioning our learned approximation on $u_t^{\theta}(x|y)$ on the choice of $y$. We therefore obtain the the *guided* conditional flow matching objective $$\begin{align*}\mathcal{L}_{\text{CFM}}(\theta) &= \,\,\mathbb{E}_{\square} \lVert u_t^{\theta}(x|y) - u_t^{\text{ref}}(x|z)\rVert^2\\ \square &= z,y \sim p_{\text{data}}(z,y), x \sim p_t(x|z)\end{align*}$$
+# Note that $(z,y) \sim p_{\text{simple}}(z,y)$ is obtained in practice by sampling an image $z$, and a label $y$, from our labelled (MNIST) dataset. This is all well and good, and we emphasize that if our goal was simply to sample from $p_{\text{data}}(x|y)$, our job would be done (at least in theory). In practice, one might argue that we care more about the *perceptual quality* of our images. To this end, we will a derive a procedure known as *classifier-free guidance*.
+
+# %% [markdown]
+# **Classifier-Free Guidance**: For the sake of intuition, we will develop guidance through the lense of Gaussian probability paths, although the final result might reasonably be applied to any probability path. Recall from the lecture that for $(a_t, b_t) = \left(\frac{\dot{\alpha}_t}{\alpha_t}, -\frac{\dot{\beta}_t \beta_t \alpha_t - \dot{\alpha}_t \beta_t^2}{\alpha_t}\right)$, we have $$u_t(x|y) = a_tx + b_t\nabla \log p_t(x|y).$$
+# This identity allows us to relate the *conditional marginal velocity* $u_t(x|y)$ to the *conditional score* $\nabla \log p_t(x|y)$. However, notice that $$\nabla \log p_t(x|y) = \nabla \log \left(\frac{p_t(x)p_t(y|x)}{p_t(y)}\right) = \nabla \log p_t(x) + \nabla \log p_t(y|x),$$
+# so that we may rewrite $$u_t(x|y) = a_tx + b_t(\nabla \log p_t(x) + \nabla \log p_t(y|x)) = u_t(x) + b_t \nabla \log p_t(y|x).$$
+# An approximation of the term $\nabla \log p_t(y|x)$ could be considered as a sort of noisy classifier (and in fact this is the origin of *classifier guidance*, which we do not consider here). In practice, people have noticed that the conditioning seems to work better when we scale the contribution of this classifier term, yielding
+# $$\tilde{u}_t(x|y) = u_t(x) + w b_t \nabla \log p_t(y|x)$$
+# where $w > 1$ is known as the *guidance scale*. We may then plug in $b_t\log p_t(y|x) = u^{\text{target}}_t(x|y) - u^{\text{target}}_t(x)$ to obtain $$\begin{align}\tilde{u}_t(x|y) &= u_t(x) + w b_t \nabla \log p_t(y|x)\\
+# &= u_t(x) + w (u^{\text{target}}_t(x|y) - u^{\text{target}}_t(x))\\
+# &= (1-w) u_t(x) + w u_t(x|y). \end{align}$$
+# The idea is thus to train both $u_t(x)$ as well as the conditional model $u_t(x|y)$, and then combine them *at inference time* to obtain $\tilde{u}_t(x|y)$. Our recipe will thus be:
+# 1. Train $u_t^{\theta} \approx u_t(x)$ as well as the conditional model $u_t^{\theta}(x|y) \approx u_t(x|y)$ using conditional flow matching.
+# 2. At inference time, sample using $\tilde{u}_t^{\theta}(x|y)$.
+#
+# "But wait!", you say, "why must we train two models?". Indeed, we can instead treat $u_t(x)$ as $u_t(x|y)$, where $y=\varnothing$ denotes *the absence of conditioning*. We may thus augment our label set with a new, additional $\varnothing$ label, so that $y \in \{0,1,\dots, 9, \varnothing\}$. This technique is known as **classifier-free guidance** (CFG). We thus arrive at
+# $$\boxed{\tilde{u}_t(x|y) = (1-w) u_t(x|\varnothing) + w u_t(x|y)}.$$
+
+# %% [markdown]
+# **Training and CFG**: We must now amend our conditional flow matching objective to account for the possibility of $y = \varnothing$. Of course, when we sample $(z,y)$ from MNIST, we will never obtain $y = \varnothing$, so we must introduce the possibliity of this artificially. To do so, we will define some hyperparameter $\eta$ to be the *probability* that we discard the original label $y$, and replace it with $\varnothing$. In practice, we might set $\varnothing = 10$, for example, as it is sufficient to distinguish it from the other digit identities. When we go and implement our model, we need ony be able to index into some embedding, such as via `torch.nn.Embedding`. We thus arrive at our CFG conditional flow matching training objective:
+# $$\begin{align*}\mathcal{L}_{\text{CFM}}(\theta) &= \,\,\mathbb{E}_{\square} \lVert u_t^{\theta}(x|y) - u_t^{\text{ref}}(x|z)\rVert^2\\
+# \square &= z,y \sim p_{\text{data}}(z,y), x \sim p_t(x|z),\,\text{replace $y$ with $\varnothing$ with probability $\eta$}\end{align*}$$
+# In plain English, this objective reads:
+# 1. Sample an image $z$ and a label $y$ from $p_{\text{data}}$ (here, MNIST).
+# 2. With probability $\eta$, replace the label $y$ with the null label $\varnothing \triangleq 10$.
+# 3. Sample $t$ from $\mathcal{U}[0,1]$.
+# 4. Sample $x$ from the conditional probability path $p_t(x|z)$.
+# 5. Regress $u_t^{\theta}(x|y)$ against $u_t^{\text{ref}}(x|z)$.
+
+# %% [markdown]
+# ### Question 2.2: Training for Classifier-Free Guidance
+# In this section, you'll the training objective $\mathcal{L}_{\text{CFM}}(\theta)$ in which $u_t^{\theta}(x|y)$ is an instance of the class `ConditionalVectorField` described below.
 
 # %% [markdown]
 # # Part 3: An Architecture for Images
@@ -92,12 +114,14 @@ data_train[1].targets
 # Below, we implement the U-Net shown in the diagram above.
 
 # %%
+silu(x) = @. x / (1 + exp(-x))
+
 # Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py#L183
 function FourierEncoder(dim)
     @assert dim % 2 == 0
     half_dim = div(dim, 2)
     weights = randn(Float32, half_dim) |> gpu_device()
-    @compact(; weights,) do t
+    @compact(; weights) do t
         t = reshape(t, 1, :)
         freqs = @. 2 * t * weights
         sin_embed = @. sqrt(2.0f0) * sinpi(freqs)
@@ -107,26 +131,12 @@ function FourierEncoder(dim)
     end
 end
 
-ResidualLayer(channels, time_embed_dim, y_embed_dim) =
+ResidualLayer(n, nt, ny) =
     @compact(;
-        block1 = Chain(
-            silu,
-            BatchNorm(channels),
-            Conv((3, 3), channels => channels; pad = 1),
-        ),
-        block2 = Chain(
-            silu,
-            BatchNorm(channels),
-            Conv((3, 3), channels => channels; pad = 1),
-        ),
-        time_adapter = Chain(
-            Dense(time_embed_dim => time_embed_dim, silu),
-            Dense(time_embed_dim => channels),
-        ),
-        y_adapter = Chain(
-            Dense(y_embed_dim => y_embed_dim, silu),
-            Dense(y_embed_dim => channels),
-        ),
+        block1 = Chain(silu, BatchNorm(n), Conv((3, 3), n => n; pad = 1)),
+        block2 = Chain(silu, BatchNorm(n), Conv((3, 3), n => n; pad = 1)),
+        time_adapter = Chain(Dense(nt => nt, silu), Dense(nt => n)),
+        y_adapter = Chain(Dense(ny => ny, silu), Dense(ny => n)),
     ) do (x, t_embed, y_embed)
         res = copy(x)
 
@@ -152,13 +162,10 @@ ResidualLayer(channels, time_embed_dim, y_embed_dim) =
         @return x
     end
 
-Encoder(channels_in, channels_out, num_residual_layers, t_embed_dim, y_embed_dim) =
+Encoder(nin, nout, nresidual, nt, ny) =
     @compact(;
-        res_blocks = fill(
-            ResidualLayer(channels_in, t_embed_dim, y_embed_dim),
-            num_residual_layers,
-        ),
-        downsample = Conv((3, 3), channels_in => channels_out; stride = 2, pad = 1),
+        res_blocks = fill(ResidualLayer(nin, nt, ny), nresidual),
+        downsample = Conv((3, 3), nin => nout; stride = 2, pad = 1),
     ) do (x, t_embed, y_embed)
         for block in res_blocks
             x = block((x, t_embed, y_embed))
@@ -167,22 +174,9 @@ Encoder(channels_in, channels_out, num_residual_layers, t_embed_dim, y_embed_dim
         @return x
     end
 
-let
-    x = randn(Float32, 28, 28, 32, 3)
-    t_embed = randn(Float32, 40, 3)
-    y_embed = randn(Float32, 40, 3)
-    # net = ResidualLayer(32, 40, 40)
-    net = Encoder(32, 64, 2, 40, 40)
-    ps, st = Lux.setup(rng, net)
-    net((x, t_embed, y_embed), ps, Lux.testmode(st)) |> first |> size
-end
-
-Midcoder(channels, num_residual_layers, t_embed_dim, y_embed_dim) =
+Midcoder(nchannel, nresidual, nt, ny) =
     @compact(;
-        res_blocks = fill(
-            ResidualLayer(channels, t_embed_dim, y_embed_dim),
-            num_residual_layers,
-        ),
+        res_blocks = fill(ResidualLayer(nchannel, nt, ny), nresidual),
     ) do (x, t_embed, y_embed)
         for block in res_blocks
             x = block((x, t_embed, y_embed))
@@ -190,63 +184,36 @@ Midcoder(channels, num_residual_layers, t_embed_dim, y_embed_dim) =
         @return x
     end
 
-Decoder(channels_in, channels_out, num_residual_layers, t_embed_dim, y_embed_dim) =
+Decoder(nin, nout, nresidual, nt, ny) =
     @compact(;
-        upsample = Chain(
-            Upsample(:bilinear; scale = 2),
-            Conv((3, 3), channels_in => channels_out; pad = 1),
-        ),
-        res_blocks = fill(
-            ResidualLayer(channels_out, t_embed_dim, y_embed_dim),
-            num_residual_layers,
-        ),
-    ) do (x, t_embed, y_embed)
+        upsample = Chain(Upsample(2, :bilinear), Conv((3, 3), nin => nout; pad = 1)),
+        res_blocks = fill(ResidualLayer(nout, nt, ny), nresidual),
+    ) do (x, t, y)
         x = upsample(x)
         for block in res_blocks
-            x = block((x, t_embed, y_embed))
+            x = block((x, t, y))
         end
         @return x
     end
 
-MNISTUNet(; channels, num_residual_layers, t_embed_dim, y_embed_dim) =
+MNISTUNet(; channels, nresidual, nt, y_embed_dim) =
     @compact(;
-        # Initial convolution: (bs, 1, 32, 32) -> (bs, c_0, 32, 32)
         init_conv = Chain(
             Conv((3, 3), 1 => channels[1]; pad = 1),
             BatchNorm(channels[1]),
             silu,
         ),
-
-        # Initialize time embedder
-        time_embedder = FourierEncoder(t_embed_dim),
-
-        # Initialize y embedder
+        time_embedder = FourierEncoder(nt),
         y_embedder = Embedding(11 => y_embed_dim),
-
-        # Encoders, Midcoders, and Decoders
         encoders = map(
-            i -> Encoder(
-                channels[i],
-                channels[i+1],
-                num_residual_layers,
-                t_embed_dim,
-                y_embed_dim,
-            ),
+            i -> Encoder(channels[i], channels[i+1], nresidual, nt, y_embed_dim),
             1:length(channels)-1,
         ),
         decoders = map(
-            i -> Decoder(
-                channels[i],
-                channels[i-1],
-                num_residual_layers,
-                t_embed_dim,
-                y_embed_dim,
-            ),
+            i -> Decoder(channels[i], channels[i-1], nresidual, nt, y_embed_dim),
             length(channels):-1:2,
         ),
-        midcoder = Midcoder(channels[end], num_residual_layers, t_embed_dim, y_embed_dim),
-
-        # Final convolution
+        midcoder = Midcoder(channels[end], nresidual, nt, y_embed_dim),
         final_conv = Conv((3, 3), channels[1] => 1; pad = 1),
     ) do (x, t, y)
         # Embed t and y
@@ -292,15 +259,28 @@ MNISTUNet(; channels, num_residual_layers, t_embed_dim, y_embed_dim) =
 # Now let's train!
 
 # %%
+function loadmnist(batchsize, split)
+    dataset = MNIST(; split)
+    imgs = dataset.features
+    labels_raw = dataset.targets
+
+    # Process images into (H,W,C,BS) batches
+    y = labels_raw .+ 1 |> collect
+    z = reshape(imgs, size(imgs, 1), size(imgs, 2), 1, size(imgs, 3)) |> f32 |> collect
+
+    # Normalize
+    μ, σ = 5.0f-1, 5.0f-1
+    @. z = (z - μ) / σ
+
+    # Use DataLoader to automatically minibatch and shuffle the data
+    DataLoader((y, z); batchsize, shuffle = true, partial = false)
+end
+
 # Initialize model
 unet = let
     device = gpu_device()
-    model = MNISTUNet(;
-        channels = [32, 64, 128],
-        num_residual_layers = 2,
-        t_embed_dim = 40,
-        y_embed_dim = 40,
-    )
+    model =
+        MNISTUNet(; channels = [32, 64, 128], nresidual = 2, nt = 40, y_embed_dim = 40)
     ps, st = Lux.setup(rng, model) |> device
     train_state = Training.TrainState(model, ps, st, Adam(1.0f-3))
     nepoch = 20
@@ -335,7 +315,7 @@ let
     # Play with these!
     nsample = 10
     nstep = 100
-    guidance_scales = [0f0, 3f0, 5f0]
+    guidance_scales = [0.0f0, 3.0f0, 5.0f0]
     fig = Figure(; size = (800, 300))
     for (i, w) in enumerate(guidance_scales)
         labels = 1:11

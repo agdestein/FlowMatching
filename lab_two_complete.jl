@@ -1,4 +1,3 @@
-using ForwardDiff: vector_mode_jacobian
 # %% [markdown]
 # # Lab Two: Flow Matching and Score Matching
 
